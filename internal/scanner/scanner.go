@@ -308,23 +308,32 @@ func batchScan(jobs []ScanJob, concurrentScans int, client *k8s.Client, tlsConfi
 			Port:     job.Port,
 			Protocol: "tcp",
 			State:    "open",
-			Service:  "ssl/tls",
+			Service:  "unknown", // Will be determined after TLS detection
 		}
 
 		portResult.TlsVersions, portResult.TlsCiphers, portResult.TlsCipherStrength = ExtractTLSInfo(scanResult)
-		portResult.TlsKeyExchange = ExtractKeyExchangeFromTestSSL(portData)
-
-		PopulatePQCFields(&portResult)
 
 		if len(portResult.TlsVersions) > 0 || len(portResult.TlsCiphers) > 0 {
+			// TLS detected
+			portResult.Service = "https"
+			portResult.TlsKeyExchange = ExtractKeyExchangeFromTestSSL(portData)
+			PopulatePQCFields(&portResult)
 			portResult.Status = StatusOK
 			portResult.Reason = "TLS scan successful"
 			if tlsConfig != nil {
 				CheckCompliance(&portResult, tlsConfig)
 			}
 		} else {
-			portResult.Status = StatusNoTLS
-			portResult.Reason = "Port open but no TLS detected"
+			// No TLS detected - check if it's HTTP
+			if DetectHTTP(job.IP, job.Port) {
+				portResult.Service = "http"
+				portResult.Status = StatusNoTLS
+				portResult.Reason = "Port open, serving plain HTTP (no TLS)"
+			} else {
+				portResult.Service = "unknown"
+				portResult.Status = StatusNoTLS
+				portResult.Reason = "Port open but no TLS detected"
+			}
 		}
 
 		if client != nil {

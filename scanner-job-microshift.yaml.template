@@ -26,9 +26,9 @@ spec:
             fi
 
             echo "Generated Targets: $TARGET_LIST"
-     
-      
-            /usr/local/bin/tls-scanner --targets "$TARGET_LIST" --json-file /artifacts/results.json --csv-file /artifacts/results.csv --log-file /artifacts/scan.log  &
+
+
+            /usr/local/bin/tls-scanner --targets "$TARGET_LIST" --disable-lsof --json-file /artifacts/results.json --csv-file /artifacts/results.csv --log-file /artifacts/scan.log  &
             
             SCANNER_PID=$!
             

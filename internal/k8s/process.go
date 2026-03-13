@@ -126,6 +126,11 @@ func (c *Client) GetAndCachePodProcesses(pod PodInfo) map[string]map[int]string 
 	c.processDiscoveryAttempted[pod.Name] = true
 	c.processCacheMutex.Unlock()
 
+	if c.disableLsof {
+		log.Printf("lsof disabled, skipping process discovery for pod %s/%s", pod.Namespace, pod.Name)
+		return nil
+	}
+
 	processMap, listenInfoMap, err := c.GetProcessMapForPod(pod)
 	if err != nil {
 		log.Printf("Could not get process map for pod %s/%s: %v", pod.Namespace, pod.Name, err)

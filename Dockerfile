@@ -1,4 +1,4 @@
-FROM registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.24-openshift-4.22 AS builder
+FROM golang:1.24-bullseye AS builder
 
 WORKDIR /app
 
@@ -7,17 +7,18 @@ RUN go mod download
 
 COPY . ./
 
-RUN make build
+RUN mkdir -p bin && \
+    CGO_ENABLED=0 go build -mod=readonly -ldflags="-s -w" -o bin/tls-scanner ./cmd/tls-scanner
 
-FROM registry.ci.openshift.org/ocp/4.22:base-rhel9
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 
 ARG OC_VERSION=latest
 ARG TARGETARCH
 ARG TESTSSL_VERSION=3.2.2
 
-RUN dnf -y update && \
-    dnf install -y --allowerasing binutils file go podman runc jq skopeo tar lsof openssl bash && \
-    dnf clean all
+RUN microdnf -y update && \
+    microdnf install -y binutils file go podman runc jq skopeo tar lsof openssl bash procps-ng wget hostname bind-utils && \
+    microdnf clean all
 
 RUN wget -O "openshift-client-linux-${OC_VERSION}.tar.gz" "https://mirror.openshift.com/pub/openshift-v4/${TARGETARCH}/clients/ocp/${OC_VERSION}/openshift-client-linux.tar.gz" && \
     tar -C /usr/local/bin -xzvf "openshift-client-linux-$OC_VERSION.tar.gz" oc && \
@@ -32,6 +33,7 @@ RUN curl -L "https://testssl.sh/testssl.sh-${TESTSSL_VERSION}.tar.gz" -o /tmp/te
     rm -f /tmp/testssl.tar.gz
 
 COPY --from=builder /app/bin/tls-scanner /usr/local/bin/tls-scanner
+COPY .tlsscannerignore /.tlsscannerignore
 
 ENTRYPOINT ["/usr/local/bin/tls-scanner"]
 

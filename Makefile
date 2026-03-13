@@ -1,7 +1,8 @@
 # Makefile for tls-scanner
 
-# Binary name
-BINARY_NAME=tls-scanner
+# Binary names
+SCANNER_BINARY=tls-scanner
+ANALYZER_BINARY=tls-analyzer
 
 # Build directory
 BUILD_DIR=bin
@@ -23,11 +24,12 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 .PHONY: all
 all: build
 
-# Build the binary
+# Build both binaries
 .PHONY: build
 build:
 	mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 $(GOBUILD) -mod=readonly -ldflags="$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/tls-scanner
+	CGO_ENABLED=0 $(GOBUILD) -mod=readonly -ldflags="$(LDFLAGS)" -o $(BUILD_DIR)/$(SCANNER_BINARY) ./cmd/tls-scanner
+	CGO_ENABLED=0 $(GOBUILD) -mod=readonly -ldflags="$(LDFLAGS)" -o $(BUILD_DIR)/$(ANALYZER_BINARY) ./cmd/tls-analyzer
 
 # Clean build artifacts
 .PHONY: clean
@@ -61,15 +63,16 @@ bench-integration:
 vet:
 	$(GOCMD) vet ./...
 
-# Install the binary to GOPATH/bin
+# Install binaries to GOPATH/bin
 .PHONY: install
 install:
 	$(GOCMD) install ./cmd/tls-scanner
+	$(GOCMD) install ./cmd/tls-analyzer
 
-# Run the program with default parameters
+# Run the scanner with default parameters
 .PHONY: run
 run: build
-	./$(BUILD_DIR)/$(BINARY_NAME)
+	./$(BUILD_DIR)/$(SCANNER_BINARY)
 
 # Help target
 .PHONY: help

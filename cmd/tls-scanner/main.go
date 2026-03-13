@@ -60,12 +60,15 @@ func run(args []string) (exitCode int) {
 	concurrentScans := fs.Int("j", 0, "Number of concurrent scans; 0 = runtime.NumCPU()")
 	allPods := fs.Bool("all-pods", false, "Scan all pods in the cluster (overrides --host)")
 	componentFilter := fs.String("component-filter", "", "Filter pods by a comma-separated list of component names (only used with --all-pods)")
+	deploymentFilter := fs.String("deployment-filter", "", "Filter pods by a comma-separated list of deployment names (only used with --all-pods)")
 	namespaceFilter := fs.String("namespace-filter", "", "Filter pods by a comma-separated list of namespaces (only used with --all-pods)")
+	ignoreFile := fs.String("ignore-file", ".tlsscannerignore", "Path to file containing deployment names to ignore (default: .tlsscannerignore)")
 	targets := fs.String("targets", "", "A comma-separated list of host:port targets to scan")
 	limitIPs := fs.Int("limit-ips", 0, "Limit the number of IPs to scan for testing purposes (0 = no limit)")
 	logFile := fs.String("log-file", "", "Redirect all log output to the specified file")
 	pqcCheck := fs.Bool("pqc-check", false, "Quick check for TLS 1.3 and ML-KEM (post-quantum) support only")
 	timingFile := fs.String("timing-file", "", "Output timing report to specified file in artifact-dir")
+	disableLsof := fs.Bool("disable-lsof", false, "Disable lsof for process discovery (use when lsof is not available in containers)")
 	showVersion := fs.Bool("version", false, "Print version and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -166,15 +169,31 @@ func run(args []string) (exitCode int) {
 	}
 
 	if *allPods {
-		client, err = k8s.NewClient()
+		client, err = k8s.NewClient(*disableLsof)
 		if err != nil {
 			log.Printf("Could not create kubernetes client for --all-pods: %v", err)
 			return 1
 		}
 
+		if *disableLsof {
+			log.Print("lsof process discovery is disabled (--disable-lsof)")
+		}
+
 		pods = client.GetAllPodsInfo()
 		pods = client.FilterPodsByComponent(pods, *componentFilter)
+		pods = k8s.FilterPodsByDeployment(pods, *deploymentFilter)
 		pods = k8s.FilterPodsByNamespace(pods, *namespaceFilter)
+
+		// Load and apply ignore file
+		ignoreSet, err := k8s.LoadIgnoreFile(*ignoreFile)
+		if err != nil {
+			log.Printf("Warning: Failed to load ignore file: %v", err)
+		} else {
+			pods = k8s.FilterPodsFromIgnoreList(pods, ignoreSet)
+		}
+
+		// Exclude pods owned by Jobs
+		pods = k8s.ExcludeJobPods(pods)
 
 		log.Printf("Found %d pods to scan from the cluster.", len(pods))
 

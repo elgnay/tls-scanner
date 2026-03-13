@@ -24,6 +24,7 @@ Set these environment variables in your CI job:
 - `SCANNER_IMAGE`: The full tag of the image to build and push (e.g., `quay.io/my-org/tls-scanner:latest`).
 - `NAMESPACE`: The OpenShift/Kubernetes namespace where the scanner Job will be deployed (e.g., `scanner-project`). **Note:** This does NOT restrict what gets scanned - it only determines where the scanner runs.
 - `NAMESPACE_FILTER`: (Optional) Comma-separated list of namespaces to scan. If not set, the scanner will scan all pods in the entire cluster. Example: `production,staging` to scan only those namespaces.
+- `DEPLOYMENT_FILTER`: (Optional) Comma-separated list of deployment names to scan. If not set, all pods are scanned (subject to namespace filter). Example: `kube-apiserver,etcd` to scan only those deployments.
 - `KUBECONFIG`: Path to the kubeconfig file for the ephemeral test cluster.
 - `JOB_TEMPLATE_FILE`: (Optional) Path to the Job manifest template used by `deploy.sh deploy` (default: `scanner-job.yaml.template`). For host-based scanning, use a template that runs with host network access (e.g. `scanner-job-microshift.yaml.template`).
 - `SCAN_MODE`: (Optional) `pod` (default) or `host`. **Pod mode** discovers pods in the cluster and scans their TLS ports. **Host mode** is for environments where core components (API server, etcd, kubelet) run on the host rather than in pods—e.g. single-node or edge setups such as MicroShift. Use a job template with `hostNetwork: true` and set `SCAN_MODE=host` so the scanner runs on the host and can reach those services.
@@ -67,6 +68,175 @@ kubectl cp "${NAMESPACE}/${POD_NAME}:/artifacts/." "./artifacts/"
 ```
 
 Your `./artifacts` directory will now contain `results.json`, `results.csv`, and `scan.log`.
+
+### Ignoring Deployments
+
+You can exclude specific deployments from scanning by creating a `.tlsscannerignore` file in your working directory. This is useful for:
+- Skipping test/development deployments
+- Excluding known-good deployments to reduce scan time
+- Filtering out third-party components
+
+#### Creating an Ignore File
+
+Create a `.tlsscannerignore` file in your current directory:
+
+```bash
+# .tlsscannerignore
+# Lines starting with # are comments
+# One deployment name per line
+
+# Ignore by deployment name only (applies to all namespaces)
+test-deployment
+dev-app
+
+# Ignore by namespace/deployment (more specific)
+kube-system/coredns
+monitoring/prometheus-operator
+```
+
+#### Using the Ignore File
+
+**Default behavior** (automatically reads `.tlsscannerignore`):
+```bash
+./tls-scanner --all-pods
+```
+
+**Custom ignore file location**:
+```bash
+./tls-scanner --all-pods --ignore-file /path/to/my-ignores.txt
+```
+
+**Disable ignore file**:
+```bash
+./tls-scanner --all-pods --ignore-file ""
+```
+
+#### Automatic Exclusions
+
+The scanner automatically excludes certain types of pods:
+- **Job pods**: Pods owned by Kubernetes Jobs are automatically excluded from scanning since they are typically temporary/transient workloads.
+
+This happens automatically and does not require any configuration.
+
+#### Ignore File Format
+
+- **One deployment per line**
+- **Comments**: Lines starting with `#` are ignored
+- **Empty lines**: Ignored
+- **Formats supported**:
+  - `deployment-name` - Matches deployment in any namespace
+  - `namespace/deployment-name` - Matches specific namespace/deployment combination
+
+**Example**:
+```
+# System components to skip
+kube-system/kube-dns
+kube-system/kube-proxy
+
+# Development deployments
+dev-
+test-app
+staging-frontend
+
+# Third-party operators
+openshift-operators/cert-manager
+```
+
+## Analyzing Scan Results
+
+After running a scan, you can use the `tls-analyzer` tool to transform and analyze the JSON results.
+
+### Installation
+
+The analyzer is built alongside the scanner:
+
+```bash
+make build  # Builds both tls-scanner and tls-analyzer
+```
+
+### Grouping Results by Deployment
+
+When scanning clusters with multiple replicas of the same deployment, you can group results per deployment:
+
+```bash
+# Analyze and merge by deployment
+tls-analyzer --input artifacts/results.json \
+  --by-deployment \
+  --output-json merged-results.json
+```
+
+**What it does:**
+- Groups all pods belonging to the same deployment (Deployment, StatefulSet, DaemonSet)
+- Aggregates all IPs from the replicas into a single result entry
+- Combines port scan results, merging unique TLS versions and ciphers found across all replicas
+- Shows the deployment name instead of individual pod names
+
+**Example output difference:**
+
+**Without grouping** (per-pod):
+```csv
+IP,Port,Pod Name,Namespace,TLS Ciphers
+10.128.0.15,8443,kube-apiserver-master-0,openshift-kube-apiserver,TLS_AES_128_GCM_SHA256
+10.128.0.16,8443,kube-apiserver-master-1,openshift-kube-apiserver,TLS_AES_128_GCM_SHA256
+10.128.0.17,8443,kube-apiserver-master-2,openshift-kube-apiserver,TLS_AES_128_GCM_SHA256
+```
+
+**With grouping** (per-deployment):
+```csv
+IP,Port,Pod Name,Namespace,TLS Ciphers
+"10.128.0.15,10.128.0.16,10.128.0.17",8443,kube-apiserver,openshift-kube-apiserver,TLS_AES_128_GCM_SHA256
+```
+
+### Analyzer Options
+
+```bash
+tls-analyzer [OPTIONS]
+```
+
+**Options:**
+- `--input <file>` - Input JSON file from tls-scanner (required)
+- `--by-deployment` - Group scan results by deployment name
+- `--service <types>` - Filter by service types, comma-separated (e.g., https or http)
+- `--compact` - Show compact view: one row per component with all ports
+- `--show-namespace` - Show namespace column in compact view
+- `--output-json <file>` - Output transformed JSON to file
+- `--version` - Print version and exit
+
+### Usage Examples
+
+```bash
+# View results as a table (stdout)
+tls-analyzer --input results.json --by-deployment
+
+# Show compact view: one row per component with all ports
+tls-analyzer --input results.json --by-deployment --compact
+
+# Show compact view with namespace column
+tls-analyzer --input results.json --by-deployment --compact --show-namespace
+
+# Show only HTTPS ports (TLS-enabled)
+tls-analyzer --input results.json --service https
+
+# Show only HTTP ports (non-TLS)
+tls-analyzer --input results.json --service http
+
+# Combine filters: group by deployment and show only TLS-enabled services in compact view
+tls-analyzer --input results.json \
+  --by-deployment \
+  --service https \
+  --compact
+
+# Save transformed results to JSON
+tls-analyzer --input results.json \
+  --by-deployment \
+  --output-json merged-results.json
+
+# Analyze without merging
+tls-analyzer --input artifacts/results.json \
+  --output-json analyzed-results.json
+```
+
+**Table output:** When no output file is specified, the analyzer prints a table showing each port with its service type, TLS versions, and ciphers. This makes it easy to quickly scan for HTTP vs HTTPS ports and verify TLS configurations.
 
 ### Host-based scanning
 
@@ -116,14 +286,36 @@ The `Status` column categorizes why a port couldn't be scanned or its TLS config
 | `NO_PORTS`       | Pod declares no TCP ports in its spec                          |
 | `ERROR`          | Scan error occurred (see Reason for details)                   |
 
+### Service Detection
+
+The scanner automatically detects the service type for each port:
+
+| Service  | Description                                                          |
+| -------- | -------------------------------------------------------------------- |
+| `https`  | TLS/SSL detected - port is serving encrypted traffic                |
+| `http`   | Plain HTTP detected - port is serving unencrypted HTTP traffic      |
+| `unknown`| Port is open but service type could not be determined               |
+
+**Detection methods:**
+- **TLS services** (`https`): Detected by testssl.sh TLS handshake
+- **Plain HTTP** (`http`): Detected by sending HTTP/1.0 GET request and checking response
+- **Unknown**: Port open but doesn't respond to HTTP or has no TLS
+
+**Note:** Ports with `service: "http"` and `status: "NO_TLS"` are typically:
+- Metrics endpoints (Prometheus)
+- Health/readiness probes
+- Internal service communication in trusted networks
+- These are **expected and acceptable** when not exposed externally
+
 ### Example Output
 
 ```csv
 IP,Port,Protocol,Service,Pod Name,Namespace,...,Status,Reason,Listen Address
 10.128.0.15,8443,tcp,https,kube-apiserver-pod,openshift-kube-apiserver,...,OK,TLS scan successful,*
-10.0.53.147,9257,tcp,N/A,controller-manager-pod,openshift-cloud-controller,...,LOCALHOST_ONLY,Bound to 127.0.0.1 not accessible from pod IP,127.0.0.1
-10.0.87.193,10258,tcp,N/A,aws-ccm-pod,openshift-cloud-controller,...,FILTERED,Network policy or firewall blocking access,N/A
-10.128.0.20,8080,tcp,http,metrics-pod,openshift-monitoring,...,NO_TLS,Port open but no TLS detected (plain HTTP/TCP),*
+10.0.53.147,9257,tcp,unknown,controller-manager-pod,openshift-cloud-controller,...,LOCALHOST_ONLY,Bound to 127.0.0.1 not accessible from pod IP,127.0.0.1
+10.0.87.193,10258,tcp,unknown,aws-ccm-pod,openshift-cloud-controller,...,FILTERED,Network policy or firewall blocking access,N/A
+10.128.0.20,8080,tcp,http,metrics-pod,openshift-monitoring,...,NO_TLS,Port open, serving plain HTTP (no TLS),*
+10.128.0.147,8383,tcp,http,klusterlet-addon-controller,open-cluster-management,...,NO_TLS,Port open, serving plain HTTP (no TLS),*
 ```
 
 ### Interpreting Results
@@ -132,7 +324,14 @@ IP,Port,Protocol,Service,Pod Name,Namespace,...,Status,Reason,Listen Address
 
 2. **FILTERED ports**: The scanner couldn't reach these ports due to network policies, firewall rules, or the service not listening on the pod IP. Review network policies if you need to scan these.
 
-3. **NO_TLS ports**: These ports are open but don't use TLS. This may be expected (e.g., health check endpoints, plaintext metrics) or may indicate a security concern depending on the data transmitted.
+3. **NO_TLS ports**: These ports are open but don't use TLS. The `Service` field indicates what protocol was detected:
+   - `service: "http"` - Plain HTTP detected (common for metrics, health checks)
+   - `service: "unknown"` - Port is open but protocol could not be determined
+
+   This is **expected** for internal endpoints like Prometheus metrics or Kubernetes health probes. These are secure when:
+   - Not exposed externally (no LoadBalancer/NodePort/Ingress)
+   - Protected by NetworkPolicies
+   - Serving non-sensitive data (metrics, status)
 
 4. **MTLS_REQUIRED ports**: Common for etcd (ports 2379/2380) and other services requiring mutual TLS. The scanner can't complete the handshake without a client certificate.
 
@@ -177,7 +376,9 @@ The scanner binary accepts the following command-line options. These are configu
 - `-targets <host:port,...>` - Comma-separated list of host:port targets to scan
 - `-all-pods` - Scan all pods in the cluster (requires cluster access)
 - `-component-filter <names>` - Filter pods by component name (comma-separated, used with -all-pods)
+- `-deployment-filter <names>` - Filter pods by deployment name (comma-separated, used with -all-pods)
 - `-namespace-filter <names>` - Filter pods by namespace (comma-separated, used with -all-pods)
+- `-ignore-file <path>` - Path to file containing deployment names to ignore (default: .tlsscannerignore)
 - `-limit-ips <num>` - Cap number of IPs to scan, for testing (0 = no limit)
 - `-pqc-check` - Check for TLS 1.3 + ML-KEM (post-quantum) support; exits non-zero on failure
 - `-j <num>` - Number of concurrent scans; 0 = runtime.NumCPU() (default: 0)
@@ -187,4 +388,5 @@ The scanner binary accepts the following command-line options. These are configu
 - `-junit-file <file>` - Output results in JUnit XML format to specified file
 - `-log-file <file>` - Redirect all log output to the specified file
 - `-timing-file <file>` - Write timing report to specified file in artifact-dir
+- `-disable-lsof` - Disable lsof for process discovery (use when lsof is not available in containers)
 - `-version` - Print version and exit

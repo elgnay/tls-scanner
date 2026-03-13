@@ -12,16 +12,17 @@
 #   (no action)     - Run a full-deploy and then cleanup.
 #
 # Environment Variables:
-#   DOCKERFILE       - Dockerfile to use (default: Dockerfile, use Dockerfile.local for local builds)
-#   SCANNER_IMAGE    - Image name (default: quay.io/user/tls-scanner:latest)
-#   NAMESPACE        - Target namespace (default: current oc project)
-#   NAMESPACE_FILTER - Comma-separated namespace list to scan
-#   LIMIT_IPS        - Limit number of IPs to scan (default: 0 = no limit)
-#   SCANNER_CPU      - CPU request/limit for scanner pod (default: 4)
-#   SCANNER_MEM      - Memory request/limit for scanner pod (default: 4Gi)
-#   SCANNER_PARALLEL - Parallel scan count (default: 4)
-#   ARTIFACT_WAIT    - Seconds to keep pod alive after scan for artifact collection (default: 30, CI uses 300)
-#   TLS_TEST_TIMEOUT - Timeout for cluster stabilization during TLS tests (default: 600)
+#   DOCKERFILE           - Dockerfile to use (default: Dockerfile, use Dockerfile.local for local builds)
+#   SCANNER_IMAGE        - Image name (default: quay.io/user/tls-scanner:latest)
+#   NAMESPACE            - Target namespace (default: current oc project)
+#   NAMESPACE_FILTER     - Comma-separated namespace list to scan
+#   DEPLOYMENT_FILTER    - Comma-separated deployment name list to scan
+#   LIMIT_IPS            - Limit number of IPs to scan (default: 0 = no limit)
+#   SCANNER_CPU          - CPU request/limit for scanner pod (default: 4)
+#   SCANNER_MEM          - Memory request/limit for scanner pod (default: 4Gi)
+#   SCANNER_PARALLEL     - Parallel scan count (default: 4)
+#   ARTIFACT_WAIT        - Seconds to keep pod alive after scan for artifact collection (default: 30, CI uses 300)
+#   TLS_TEST_TIMEOUT     - Timeout for cluster stabilization during TLS tests (default: 600)
 
 # --- Configuration ---
 APP_NAME="tls-scanner"
@@ -40,7 +41,8 @@ SCAN_MODE=${SCAN_MODE:-"pod"}
 JOB_NAME="tls-scanner-job"
 LIMIT_IPS="${LIMIT_IPS:-0}"  # Limit number of IPs to scan (0 = no limit, useful for testing)
 # Architectures to build container images for
-BUILD_PLATFORMS="linux/amd64,linux/arm64,linux/s390x,linux/ppc64le"
+# Multi-platform: BUILD_PLATFORMS="linux/amd64,linux/arm64,linux/s390x,linux/ppc64le"
+BUILD_PLATFORMS="${BUILD_PLATFORMS:-linux/amd64}"
 
 # TLS test configuration
 TLS_TEST_TIMEOUT=${TLS_TEST_TIMEOUT:-600}  # 10 minutes default, configurable
@@ -195,7 +197,12 @@ EOF
     if [ -n "$NAMESPACE_FILTER" ]; then
         NAMESPACE_FILTER_ARG="--namespace-filter $(echo "${NAMESPACE_FILTER}" | tr -d ' ')"
     fi
-    
+
+    DEPLOYMENT_FILTER_ARG=""
+    if [ -n "$DEPLOYMENT_FILTER" ]; then
+        DEPLOYMENT_FILTER_ARG="--deployment-filter $(echo "${DEPLOYMENT_FILTER}" | tr -d ' ')"
+    fi
+
     LIMIT_IPS_ARG=""
     if [ "$LIMIT_IPS" -gt 0 ] 2>/dev/null; then
         LIMIT_IPS_ARG="--limit-ips ${LIMIT_IPS}"
@@ -206,7 +213,7 @@ EOF
     SCANNER_MEM="${SCANNER_MEM:-4Gi}"
     SCANNER_PARALLEL="${SCANNER_PARALLEL:-4}"
     ARTIFACT_WAIT="${ARTIFACT_WAIT:-30}"
-    sed -e "s|\\\${SCANNER_IMAGE}|${SCANNER_IMAGE}|g" -e "s|\\\${NAMESPACE}|${NAMESPACE}|g" -e "s|\\\${JOB_NAME}|${JOB_NAME}|g" -e "s|\\\${NAMESPACE_FILTER_ARG}|${NAMESPACE_FILTER_ARG}|g" -e "s|\\\${LIMIT_IPS_ARG}|${LIMIT_IPS_ARG}|g" -e "s|\\\${SCANNER_CPU:-4}|${SCANNER_CPU}|g" -e "s|\\\${SCANNER_MEM:-4Gi}|${SCANNER_MEM}|g" -e "s|\\\${SCANNER_PARALLEL:-4}|${SCANNER_PARALLEL}|g" -e "s|\\\${ARTIFACT_WAIT:-300}|${ARTIFACT_WAIT}|g" "$JOB_TEMPLATE" | oc apply -f -
+    sed -e "s|\\\${SCANNER_IMAGE}|${SCANNER_IMAGE}|g" -e "s|\\\${NAMESPACE}|${NAMESPACE}|g" -e "s|\\\${JOB_NAME}|${JOB_NAME}|g" -e "s|\\\${NAMESPACE_FILTER_ARG}|${NAMESPACE_FILTER_ARG}|g" -e "s|\\\${DEPLOYMENT_FILTER_ARG}|${DEPLOYMENT_FILTER_ARG}|g" -e "s|\\\${LIMIT_IPS_ARG}|${LIMIT_IPS_ARG}|g" -e "s|\\\${SCANNER_CPU:-4}|${SCANNER_CPU}|g" -e "s|\\\${SCANNER_MEM:-4Gi}|${SCANNER_MEM}|g" -e "s|\\\${SCANNER_PARALLEL:-4}|${SCANNER_PARALLEL}|g" -e "s|\\\${ARTIFACT_WAIT:-300}|${ARTIFACT_WAIT}|g" "$JOB_TEMPLATE" | oc apply -f -
     check_error "Applying Job manifest"
 
     echo "--> Scanner Job '${JOB_NAME}' deployed."
@@ -742,7 +749,8 @@ cleanup() {
 
 # --- Main Logic ---
 
-NAMESPACE_FILTER="${NAMESPACE_FILTER:-}"
+NAMESPACE_FILTER="${NAMESPACE_FILTER:-multicluster-engine,open-cluster-management,open-cluster-management-hub,open-cluster-management-agent,open-cluster-management-agent-addon}"
+DEPLOYMENT_FILTER="${DEPLOYMENT_FILTER:-}"
 VERBOSE=false
 POSITIONAL_ARGS=()
 
@@ -750,6 +758,11 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     -n|--namespace-filter)
       NAMESPACE_FILTER="$2"
+      shift
+      shift
+      ;;
+    -d|--deployment-filter)
+      DEPLOYMENT_FILTER="$2"
       shift
       shift
       ;;

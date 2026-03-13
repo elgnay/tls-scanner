@@ -1,10 +1,12 @@
 package k8s
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	configclientset "github.com/openshift/client-go/config/clientset/versioned"
@@ -17,7 +19,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-func NewClient() (*Client, error) {
+func NewClient(disableLsof bool) (*Client, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		log.Printf("Could not load in-cluster config, falling back to kubeconfig: %v", err)
@@ -70,6 +72,7 @@ func NewClient() (*Client, error) {
 		configClient:              configClient,
 		operatorClient:            operatorClient,
 		mcfgClient:                mcfgClient,
+		disableLsof:               disableLsof,
 	}, nil
 }
 
@@ -169,5 +172,202 @@ func FilterPodsByNamespace(pods []PodInfo, namespaceFilter string) []PodInfo {
 		}
 	}
 	log.Printf("Filtered pods by namespace: %d remaining out of %d", len(filtered), len(pods))
+	return filtered
+}
+
+func GetDeploymentName(pod PodInfo) string {
+	// If Pod object is available, use owner references
+	if pod.Pod != nil {
+		// Check owner references for deployment/replicaset
+		for _, owner := range pod.Pod.OwnerReferences {
+			if owner.Kind == "ReplicaSet" {
+				// Extract deployment name from replicaset (format: deployment-name-xxxxx)
+				rsName := owner.Name
+				// Remove the replicaset hash suffix
+				if idx := strings.LastIndex(rsName, "-"); idx != -1 {
+					return rsName[:idx]
+				}
+				return rsName
+			}
+			if owner.Kind == "Deployment" {
+				return owner.Name
+			}
+			if owner.Kind == "StatefulSet" || owner.Kind == "DaemonSet" {
+				return owner.Name
+			}
+		}
+
+		// Fallback to common labels
+		labels := pod.Pod.Labels
+		if name, exists := labels["app.kubernetes.io/name"]; exists {
+			return name
+		}
+		if name, exists := labels["app"]; exists {
+			return name
+		}
+	}
+
+	// Extract deployment name from pod name pattern
+	// Pod names follow: deployment-name-replicaset-hash-pod-hash
+	// Examples:
+	//   cluster-manager-56859fc769-94mss -> cluster-manager
+	//   ocm-controller-5b5f78cbc4-8cgvk -> ocm-controller
+	//   klusterlet-765778b8cd-svvlp -> klusterlet
+	podName := pod.Name
+
+	// Remove the last two hash segments
+	// First remove pod hash (last segment after last -)
+	if idx := strings.LastIndex(podName, "-"); idx != -1 {
+		podName = podName[:idx]
+	}
+	// Then remove replicaset hash (second to last segment)
+	if idx := strings.LastIndex(podName, "-"); idx != -1 {
+		return podName[:idx]
+	}
+
+	// If pattern doesn't match, return the pod name as-is
+	return pod.Name
+}
+
+func FilterPodsByDeployment(pods []PodInfo, deploymentFilter string) []PodInfo {
+	if deploymentFilter == "" {
+		return pods
+	}
+
+	log.Printf("Filtering pods by deployment name(s): %s", deploymentFilter)
+	filterNames := strings.Split(deploymentFilter, ",")
+	filterSet := make(map[string]struct{})
+	for _, name := range filterNames {
+		filterSet[strings.TrimSpace(name)] = struct{}{}
+	}
+
+	var filtered []PodInfo
+	for _, pod := range pods {
+		deploymentName := GetDeploymentName(pod)
+		if _, ok := filterSet[deploymentName]; ok {
+			filtered = append(filtered, pod)
+			log.Printf("Matched pod %s/%s with deployment name: %s", pod.Namespace, pod.Name, deploymentName)
+		}
+	}
+	log.Printf("Filtered pods by deployment: %d remaining out of %d", len(filtered), len(pods))
+	return filtered
+}
+
+// LoadIgnoreFile reads a .tlsscannerignore file and returns a set of deployment names to ignore
+func LoadIgnoreFile(ignoreFilePath string) (map[string]struct{}, error) {
+	ignoreSet := make(map[string]struct{})
+
+	// If no path provided, try default location
+	if ignoreFilePath == "" {
+		ignoreFilePath = ".tlsscannerignore"
+	}
+
+	// Check if file exists
+	if _, err := os.Stat(ignoreFilePath); os.IsNotExist(err) {
+		log.Printf("No ignore file found at %s, proceeding without deployment ignores", ignoreFilePath)
+		return ignoreSet, nil
+	}
+
+	absPath, _ := filepath.Abs(ignoreFilePath)
+	log.Printf("Loading deployment ignore list from: %s", absPath)
+
+	file, err := os.Open(ignoreFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open ignore file %s: %w", ignoreFilePath, err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		ignoreSet[line] = struct{}{}
+		log.Printf("  [line %d] Ignoring deployment: %s", lineNum, line)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading ignore file: %w", err)
+	}
+
+	if len(ignoreSet) > 0 {
+		log.Printf("Loaded %d deployment(s) to ignore from %s", len(ignoreSet), ignoreFilePath)
+	}
+
+	return ignoreSet, nil
+}
+
+// FilterPodsFromIgnoreList removes pods whose deployments are in the ignore list
+func FilterPodsFromIgnoreList(pods []PodInfo, ignoreSet map[string]struct{}) []PodInfo {
+	if len(ignoreSet) == 0 {
+		return pods
+	}
+
+	log.Printf("Applying deployment ignore list (%d entries)", len(ignoreSet))
+	var filtered []PodInfo
+	ignoredCount := 0
+
+	for _, pod := range pods {
+		deploymentName := GetDeploymentName(pod)
+		namespace := pod.Namespace
+
+		// Check both "namespace/deployment" and just "deployment"
+		fullName := namespace + "/" + deploymentName
+		shouldIgnore := false
+
+		if _, ok := ignoreSet[fullName]; ok {
+			shouldIgnore = true
+			log.Printf("Ignoring pod %s/%s (matches ignore pattern: %s)", namespace, pod.Name, fullName)
+		} else if _, ok := ignoreSet[deploymentName]; ok {
+			shouldIgnore = true
+			log.Printf("Ignoring pod %s/%s (matches ignore pattern: %s)", namespace, pod.Name, deploymentName)
+		}
+
+		if !shouldIgnore {
+			filtered = append(filtered, pod)
+		} else {
+			ignoredCount++
+		}
+	}
+
+	log.Printf("Filtered out %d pods from ignore list: %d remaining out of %d", ignoredCount, len(filtered), len(pods))
+	return filtered
+}
+
+// ExcludeJobPods filters out pods that are owned by Kubernetes Jobs
+func ExcludeJobPods(pods []PodInfo) []PodInfo {
+	log.Println("Excluding pods owned by Jobs...")
+	var filtered []PodInfo
+	excludedCount := 0
+
+	for _, pod := range pods {
+		if pod.Pod == nil {
+			filtered = append(filtered, pod)
+			continue
+		}
+
+		isJobPod := false
+		for _, owner := range pod.Pod.OwnerReferences {
+			if owner.Kind == "Job" {
+				isJobPod = true
+				log.Printf("Excluding Job pod: %s/%s (owned by Job: %s)", pod.Namespace, pod.Name, owner.Name)
+				break
+			}
+		}
+
+		if !isJobPod {
+			filtered = append(filtered, pod)
+		} else {
+			excludedCount++
+		}
+	}
+
+	log.Printf("Excluded %d Job pods: %d remaining out of %d", excludedCount, len(filtered), len(pods))
 	return filtered
 }

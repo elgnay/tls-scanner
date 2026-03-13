@@ -72,4 +72,5 @@ type Client struct {
 	configClient              *configclientset.Clientset
 	operatorClient            *operatorclientset.Clientset
 	mcfgClient                *mcfgclientset.Clientset
+	disableLsof               bool
 }

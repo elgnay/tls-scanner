@@ -9,3 +9,5 @@ test-tls13-run.log
 tls13-scan.log
 *-scan.log
 bench.sh
+results.json
+/tls-analyzer

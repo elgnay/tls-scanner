@@ -1,0 +1,17 @@
+# TLS Scanner Ignore File
+#
+# List deployment names to exclude from scanning, one per line.
+# Lines starting with # are comments and will be ignored.
+# Empty lines are also ignored.
+#
+# Format: namespace/deployment-name or just deployment-name
+# Examples:
+#   kube-system/coredns
+#   monitoring-deployment
+#   test-app
+
+# Exclude test deployments
+# test-deployment
+
+# Exclude specific system components
+# kube-system/kube-dns
